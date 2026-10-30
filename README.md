@@ -2,7 +2,7 @@
 
 让 Codex 通过 MCP 调用本机 Claude Code：Codex 发出任务，桥接器运行 `claude -p`，等待执行完成后返回结果和会话 ID，可继续同一会话。
 
-当前实现默认通过 DeepSeek 的 Anthropic 兼容接口运行 Claude Code。
+默认通过 DeepSeek 的 Anthropic 兼容接口运行 Claude Code；`CLAUDE_BRIDGE_BASE_URL` 可指向其他兼容端点。
 
 ```text
 Codex → MCP stdio → server.js → Claude Code → DeepSeek
@@ -11,7 +11,7 @@ Codex ← 执行结果、会话 ID、费用和轮次 ← Claude Code
 
 ## 安装
 
-需要 Node.js（依赖要求至少 18，本次验证使用 24）、npm，以及已安装并完成配置的 Claude Code 和 Codex。
+需要 Node.js 18+、npm，以及已安装并完成配置的 Claude Code 和 Codex。Linux/macOS 已验证；Windows 使用 `.cmd` 包装器时需要确认 Codex 的启动环境能直接执行它。
 
 ```bash
 git clone https://github.com/guiarch3-pixe/claude-codex-bridge.git
@@ -41,6 +41,8 @@ CLAUDE_BRIDGE_CLAUDE_BIN = "/absolute/path/to/claude"
 
 MCP 的配置字段见 [Codex 官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。配置后重启 Codex，可通过 `codex mcp list` 检查注册情况。
 
+Windows 上可直接让 `command` 指向 `node`、`args` 指向 `server.js`，并在 `[mcp_servers.claude_code.env]` 设置目录和可执行文件；`start-bridge.example.sh` 需要 Git Bash 运行。`DEEPSEEK_API_KEY` 建议由父进程环境变量传入。
+
 ## 工具
 
 桥接器提供 `claude_run`：
@@ -55,7 +57,7 @@ MCP 的配置字段见 [Codex 官方 MCP 文档](https://learn.chatgpt.com/docs/
 | `max_turns` | 可选轮次限制；不传时桥接器不设置限制 |
 | `timeout_sec` | 子进程超时秒数，默认 1800；增大时同步调整 MCP 工具超时 |
 
-结果以 MCP 文本内容中的 JSON 返回，包含 `ok`、`exit_code`、`session_id`、`result_text`、`total_cost_usd`、`num_turns` 和 `native_transcript_path`；错误时会返回错误说明，部分错误包含输出尾部。
+结果以 MCP 文本内容中的 JSON 返回，包含 `ok`、`exit_code`、`session_id`、`result_text`、`total_cost_usd`、`num_turns` 和 `native_transcript_path`（找不到转录文件时为 `null`）；错误时会返回错误说明，部分错误包含输出尾部。
 
 ## 环境变量
 
@@ -63,22 +65,31 @@ MCP 的配置字段见 [Codex 官方 MCP 文档](https://learn.chatgpt.com/docs/
 | --- | --- |
 | `DEEPSEEK_API_KEY` | 传给 Claude Code 子进程的 `ANTHROPIC_API_KEY` |
 | `CLAUDE_BRIDGE_BASE_URL` | 默认 `https://api.deepseek.com/anthropic` |
-| `CLAUDE_BRIDGE_CLAUDE_BIN` | Claude Code 可执行文件路径；启动示例默认 `claude` |
-| `CLAUDE_BRIDGE_PROJECT_DIR` | 默认任务目录；启动示例默认当前工作目录 |
+| `CLAUDE_BRIDGE_CLAUDE_BIN` | Claude Code 可执行文件路径；默认 `claude`（Windows 为 `claude.cmd`） |
+| `CLAUDE_BRIDGE_PROJECT_DIR` | 默认任务目录；默认 `process.cwd()` |
 
-## 当前实现说明
+## 安全边界
 
-- 本仓库保留现有桥接器行为。直接运行 `server.js` 时仍有 Windows 专用默认值（`claude.cmd` 和 `D:\CCCowork`），其他环境应明确配置上述变量或使用启动示例。Windows 启动尚未在本次上传中验证。
-- `native_transcript_path` 是按 Windows 风格拼接的推测路径，在 Linux/macOS 上不能当作有效路径使用；实际记录由 Claude Code 自己管理。
-- 服务器内置了委派、检查工作区和 Git 提交等工作流提示，请在接入前查看 `server.js` 中的 `INSTRUCTIONS`，确认符合自己的使用方式。
-- Claude Code 可以在指定目录编辑文件和运行命令，实际行为受传入的权限模式及其自身配置影响。
-- 本机专用的 `start-bridge.sh`、`node_modules`、密钥及会话文件不纳入仓库；通用启动示例不含密钥。
+- 桥接器只通过 stdio 与 MCP 客户端通信，不监听网络端口。只把它接到你信任的 Codex/MCP 客户端。
+- Claude Code 会在 `cwd` 中读写文件并可能运行命令。默认权限模式是 `acceptEdits`；处理不可信仓库时，请降低权限、限制 `allowed_tools`，或放进容器/沙箱。
+- `INSTRUCTIONS` 要求调用方在委派前检查工作区、执行后自行复核 diff，并且只做本地 commit、不自动 push。它是指令，不是强制隔离。
+- 密钥只放在环境变量或权限为 `0600` 的 key 文件中；`start-bridge.sh`、密钥、会话文件和 `node_modules/` 都不在版本库里。
 
-## 本地检查
+## 测试
 
 ```bash
-node --check server.js
-bash -n start-bridge.example.sh
+npm test
 ```
 
-上传前另已通过 MCP 客户端验证服务初始化与 `claude_run` 工具发现。本次检查没有调用真实 Claude Code，也没有验证模型端到端执行。
+测试使用一个假的 `claude` 可执行文件和一个 MCP 客户端，验证参数拼装、输出解析、超时、转录路径和 `claude_run` 的完整 stdio 往返；不需要 API key 或网络。
+
+## 已知限制
+
+- `native_transcript_path` 是尽力而为：先按 Claude Code 的项目目录编码猜测，再按 session id 搜索 `~/.claude/projects`；找不到时返回 `null`。转录文件由 Claude Code 自己维护。
+- Windows 的 `.cmd` 启动未在自动化测试中验证；如遇 spawn 错误，请把 `CLAUDE_BRIDGE_CLAUDE_BIN` 指向可直接执行的文件。
+- 测试不调用真实 Claude Code 或 DeepSeek，真实端到端执行需要你自己配置密钥后验证。
+- 桥接器不做提示词注入防护、沙箱或权限提升；安全边界由 MCP 客户端、Claude Code 权限模式和运行环境共同决定。
+
+## License
+
+MIT
